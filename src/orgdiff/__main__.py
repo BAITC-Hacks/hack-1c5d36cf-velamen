@@ -1,4 +1,5 @@
 import argparse
+import asyncio
 import sys
 from pathlib import Path
 
@@ -23,9 +24,33 @@ def main() -> int:
     inspect = commands.add_parser("inspect", help="Прочитать документы без вызова AI")
     inspect.add_argument("--input", nargs="+", required=True)
     inspect.add_argument("--out", type=Path, required=True)
+    commands.add_parser("doctor", help="Проверить доступ к OpenAI (платные запросы)")
+    analyze = commands.add_parser("analyze", help="Извлечь факты и сравнить наборы документов")
+    analyze.add_argument("--before", nargs="+", required=True)
+    analyze.add_argument("--after", nargs="+", required=True)
+    analyze.add_argument("--until", choices=["extract", "compare"], default="compare")
+    analyze.add_argument("--out", type=Path, required=True)
     args = parser.parse_args()
     try:
         settings = load_settings()
+        if args.command == "doctor":
+            from .llm import Runtime, doctor, use_runtime
+            async def check():
+                run = Runtime(settings)
+                with use_runtime(run):
+                    try:
+                        await doctor()
+                    finally:
+                        await run.close()
+            asyncio.run(check())
+            return 0
+        if args.command == "analyze":
+            from .pipeline import analyze as run_analysis
+            asyncio.run(run_analysis(input_files(args.before), input_files(args.after), args.out,
+                                     until=args.until, settings=settings,
+                                     progress=lambda event: print(f"{event.stage}: {event.completed}/{event.total}", flush=True)))
+            print(f"Контрольная точка {args.until}: {args.out.resolve()}; состояние и ограничения — в run.json")
+            return 0
         documents = [parse_cached(file, settings.artifact_dir / "cache") for file in input_files(args.input)]
         chunks = [chunk for doc in documents for chunk in make_chunks(doc, settings.body_chars, settings.context_chars)]
         write_json(args.out / "documents.json", documents)
@@ -36,8 +61,9 @@ def main() -> int:
                 print(f"Предупреждение: {warning}")
         print(f"Результат: {args.out.resolve()}")
         return 0
-    except (ValueError, OSError) as exc:
-        print(f"Ошибка: {exc}", file=sys.stderr)
+    except Exception as exc:
+        from .llm import error_ru
+        print(f"Ошибка: {error_ru(exc)}", file=sys.stderr)
         return 1
 
 
